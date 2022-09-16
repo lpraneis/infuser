@@ -49,11 +49,14 @@ enum OperationMode {
     },
     /// clear running filter
     Clear,
+    /// get currently running filter
+    GetFilter,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Command {
     NewFilter(Option<String>),
+    GetCurrentFilter,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -64,22 +67,37 @@ async fn main() -> anyhow::Result<()> {
             run_input(&args.sock_name, &tty, inital_filter).await
         }
         OperationMode::Update { new_filter } => {
-            run_utility(&args.sock_name, Some(new_filter)).await
+            run_utility_command(&args.sock_name, Command::NewFilter(Some(new_filter))).await
         }
-        OperationMode::Clear => run_utility(&args.sock_name, None).await,
+        OperationMode::Clear => {
+            run_utility_command(&args.sock_name, Command::NewFilter(None)).await
+        }
+        OperationMode::GetFilter => {
+            run_utility_command(&args.sock_name, Command::GetCurrentFilter).await
+        }
     }
 }
 
-async fn run_utility(sock: &str, filter: Option<String>) -> anyhow::Result<()> {
+async fn run_utility_command(sock: &str, command: Command) -> anyhow::Result<()> {
     let tx_path = Path::new("/tmp").join(sock);
     let mut sock = UnixStream::connect(&tx_path).await?;
-    let command = Command::NewFilter(filter);
     let json = serde_json::to_vec(&command)?;
     let _ = sock.write(&json).await;
+    match command {
+        Command::NewFilter(_) => {}
+        Command::GetCurrentFilter => {
+            let mut response = String::new();
+            sock.read_to_string(&mut response).await?;
+            println!("{}", response);
+        }
+    }
     Ok(())
 }
 async fn run_input(sock: &str, tty: &str, inital_filter: Option<String>) -> anyhow::Result<()> {
-    let mut re = inital_filter.and_then(|filter| Regex::new(&filter).ok());
+    let mut re = inital_filter
+        .as_ref()
+        .and_then(|filter| Regex::new(filter).ok());
+    let mut filter_string = inital_filter;
     let mut input_lines = BufReader::new(tokio::io::stdin()).lines();
 
     let tx_path = Path::new("/tmp").join(sock);
@@ -115,13 +133,23 @@ async fn run_input(sock: &str, tty: &str, inital_filter: Option<String>) -> anyh
                                         #[cfg(debug_assertions)]
                                         println!("Updating regex to {f:?}");
                                         re = Some(new_regex);
+                                        filter_string = Some(f);
                                     }
                                 }
                                 Command::NewFilter(None) => {
                                         #[cfg(debug_assertions)]
                                         println!("Clearing regex");
                                         re = None;
+                                        filter_string = None;
                                 }
+                                Command::GetCurrentFilter => {
+                                    let filter = filter_string
+                                        .as_ref()
+                                        .map(|x| x.as_bytes())
+                                        .unwrap_or_else(|| b"<no current filter>");
+                                    let _ = client.write_all(filter).await;
+                                }
+
                             },
                             Err(e) => {
                                 println!("Invalid command {e:?}");

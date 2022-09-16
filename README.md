@@ -12,7 +12,7 @@ some_long_running_command | tee >(rg "important text" > /dev/pts/X)
 
 Instead, infuser is used to redirect `stdin` 
 ```
-some_long_running_command | infuser /dev/pts/X "important text"
+some_long_running_command | infuser run /dev/pts/X "important text"
 ```
 
 However, the filter used can also be updated during the execution of the program to allow the lines being redirected
@@ -33,48 +33,9 @@ OPTIONS:
     -V, --version                  Print version information
 
 SUBCOMMANDS:
-    clear     clear running filter
-    help      Print this message or the help of the given subcommand(s)
-    run       run and get input
-    update    update running infuser
-```
-
-### infuser run 
-```
-run and get input
-
-USAGE:
-    infuser run <TTY> [INITAL_FILTER]
-
-ARGS:
-    <TTY>              TTY to send filtered lines to
-    <INITAL_FILTER>    initial filter
-
-OPTIONS:
-    -h, --help    Print help information
-```
-### infuser update
-```
-infuser-update 
-update running infuser
-
-USAGE:
-    infuser update <NEW_FILTER>
-
-ARGS:
-    <NEW_FILTER>    updated filter
-
-OPTIONS:
-    -h, --help    Print help information
-```
-
-### infuser clear
-```
-clear running filter
-
-USAGE:
-    infuser clear
-
-OPTIONS:
-    -h, --help    Print help information
+    clear         clear running filter
+    get-filter    get currently running filter
+    help          Print this message or the help of the given subcommand(s)
+    run           run and get input
+    update        update running infuser
 ```
