@@ -28,11 +28,12 @@ USAGE:
 
 OPTIONS:
     -h, --help                     Print help information
-        --sock-name <SOCK_NAME>    Name of unix domain socket to be created in /tmp [default:
-                                   infuser.sock]
+        --sock-name <SOCK_NAME>    Name of unix domain socket to be created in /tmp for IPC
+                                   [default: infuser.sock]
     -V, --version                  Print version information
 
 SUBCOMMANDS:
+    clear     clear running filter
     help      Print this message or the help of the given subcommand(s)
     run       run and get input
     update    update running infuser
@@ -47,14 +48,14 @@ USAGE:
 
 ARGS:
     <TTY>              TTY to send filtered lines to
-    <INITAL_FILTER>    initial filter [default: .*]
+    <INITAL_FILTER>    initial filter
 
 OPTIONS:
     -h, --help    Print help information
-
 ```
 ### infuser update
 ```
+infuser-update 
 update running infuser
 
 USAGE:
@@ -65,6 +66,15 @@ ARGS:
 
 OPTIONS:
     -h, --help    Print help information
-
 ```
 
+### infuser clear
+```
+clear running filter
+
+USAGE:
+    infuser clear
+
+OPTIONS:
+    -h, --help    Print help information
+```
