@@ -24,6 +24,12 @@ infuser update \"New.*Thing\"
 /// clear a terminal screen
 const CLEAR_SCREEN: &str = "\x1b\x63";
 
+/// Wrapper over a tty handle and path
+struct Tty {
+    inner: File,
+    path: String,
+}
+
 /// Filters your tee
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = LONG_ABOUT)]
@@ -39,6 +45,14 @@ struct Args {
 
 #[derive(clap::Parser, Debug, PartialEq)]
 enum OperationMode {
+    /// clear running filter
+    Clear,
+    /// get currently running filter
+    GetFilter,
+    /// get currently registered tty
+    GetTty,
+    /// register current tty for output; replaces previous tty, if any
+    Listen,
     /// run and get input
     Run {
         /// TTY to send filtered lines to
@@ -52,18 +66,13 @@ enum OperationMode {
         /// updated filter
         new_filter: String,
     },
-    /// clear running filter
-    Clear,
-    /// get currently running filter
-    GetFilter,
-    /// register current tty for output. Replaces previous tty, if any
-    Listen,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Command {
     NewFilter(Option<String>),
     GetCurrentFilter,
+    GetCurrentTty,
     Listen(String),
 }
 
@@ -76,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         OperationMode::Clear => clear_filter(&args.sock_name).await,
         OperationMode::GetFilter => get_filter(&args.sock_name).await,
         OperationMode::Listen => listen(&args.sock_name).await,
+        OperationMode::GetTty => get_tty(&args.sock_name).await,
     }
 }
 
@@ -89,6 +99,15 @@ async fn clear_filter(sock: &str) -> anyhow::Result<()> {
 }
 async fn get_filter(sock: &str) -> anyhow::Result<()> {
     let cmd = Command::GetCurrentFilter;
+    let mut sock = run_utility_command(sock, cmd).await?;
+    let mut response = String::new();
+    sock.read_to_string(&mut response).await?;
+    println!("{}", response);
+    Ok(())
+}
+
+async fn get_tty(sock: &str) -> anyhow::Result<()> {
+    let cmd = Command::GetCurrentTty;
     let mut sock = run_utility_command(sock, cmd).await?;
     let mut response = String::new();
     sock.read_to_string(&mut response).await?;
@@ -113,14 +132,18 @@ async fn run_utility_command(sock: &str, command: Command) -> anyhow::Result<Uni
     Ok(sock)
 }
 
-async fn open_and_clear_tty(tty: &str) -> anyhow::Result<File> {
+async fn open_and_clear_tty(tty: &str) -> anyhow::Result<Tty> {
     let mut f = tokio::fs::OpenOptions::new()
         .write(true)
         .append(true)
         .open(tty)
         .await?;
     f.write_all(CLEAR_SCREEN.as_bytes()).await?;
-    Ok(f)
+
+    Ok(Tty {
+        inner: f,
+        path: tty.to_string(),
+    })
 }
 
 async fn run_input(
@@ -138,7 +161,7 @@ async fn run_input(
     let _ = std::fs::remove_file(&tx_path);
 
     let sock = UnixListener::bind(&tx_path)?;
-    let mut tty: Option<File> = None;
+    let mut tty: Option<Tty> = None;
 
     if let Some(tty_name) = initial_tty {
         tty = Some(open_and_clear_tty(&tty_name).await?);
@@ -152,7 +175,8 @@ async fn run_input(
                     if let Some(re) = &re {
                         if re.is_match(&x) {
                             x.push('\n');
-                            if client.write_all(x.as_bytes()).await.is_err() {
+                            if client.inner.write_all(x.as_bytes()).await.is_err() {
+                                // clear the tty if we had a write error
                                 tty = None;
                             }
                         }
@@ -182,6 +206,13 @@ async fn run_input(
                                         .map(|x| x.as_bytes())
                                         .unwrap_or_else(|| b"<no current filter>");
                                     let _ = client.write_all(filter).await;
+                                }
+                                Command::GetCurrentTty => {
+                                    let tty_name = tty
+                                        .as_ref()
+                                        .map(|x| x.path.as_bytes())
+                                        .unwrap_or_else(|| b"<no current tty>");
+                                    let _ = client.write_all(tty_name).await;
                                 }
                                 Command::Listen(tty_name) => {
                                     if let Ok(new_tty) = open_and_clear_tty(&tty_name).await {
