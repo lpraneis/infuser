@@ -19,6 +19,11 @@ long_running_command | infuser run -f \"Important Line\" /dev/pts/X
 
 The filter being used can be updated during the execution from a different terminal:
 infuser update \"New.*Thing\"
+
+On Windows, this only works in cmd.exe ( for now ) since Powershell pipes attempt to pipe
+all of the previous command's output before passing it on to the consumer process.
+
+More work is required to make this work like Powershell's `Tee-Object`
 ";
 
 /// Filters your tee
