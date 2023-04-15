@@ -1,12 +1,12 @@
+use async_trait::async_trait;
 use clap::Parser;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use tokio::{
-    fs::File,
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
-};
+
+#[cfg(unix)]
+mod unix;
+
+#[cfg(windows)]
+mod windows;
 
 static LONG_ABOUT: &str = "
 Meant to be a replacement for the following:
@@ -21,21 +21,14 @@ The filter being used can be updated during the execution from a different termi
 infuser update \"New.*Thing\"
 ";
 
-/// clear a terminal screen
-const CLEAR_SCREEN: &str = "\x1b\x63";
-
-/// Wrapper over a tty handle and path
-struct Tty {
-    inner: File,
-    path: String,
-}
-
 /// Filters your tee
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = LONG_ABOUT)]
 struct Args {
-    /// Name of unix domain socket to be created in /tmp for IPC
-    #[clap(long, value_parser, default_value = "infuser.sock")]
+    /// Name of communication pipe
+    /// On Unix, this is a Unix Domain Socket in /tmp
+    /// On Windows, this is the name of a named pipe
+    #[clap(long, value_parser, default_value = "infuser.pipe")]
     sock_name: String,
 
     /// process operation mode
@@ -45,23 +38,24 @@ struct Args {
 
 #[derive(clap::Parser, Debug, PartialEq)]
 enum OperationMode {
-    /// clear running filter
+    /// Clear running filter
     Clear,
-    /// get currently running filter
+    /// Get currently running filter
     GetFilter,
-    /// get currently registered tty
+    /// Get currently registered tty or console
     GetTty,
-    /// register current tty for output; replaces previous tty, if any
+    /// Register current console for output; replaces previous tty or console, if any
+    /// This is required on Windows since there aren't ttys
     Listen,
-    /// run and get input
+    /// Run and get input
     Run {
-        /// TTY to send filtered lines to
+        /// TTY to send filtered lines to, makes no difference on Windows
         tty: Option<String>,
-        /// initial filter
+        /// Initial filter
         #[clap(short, long)]
         filter: Option<String>,
     },
-    /// update running infuser
+    /// Update running infuser
     Update {
         /// updated filter
         new_filter: String,
@@ -76,162 +70,71 @@ enum Command {
     Listen(String),
 }
 
+#[derive(Debug, Copy, Clone)]
+enum ResponseAction {
+    WaitAndPrint,
+    Oneshot,
+}
+
+struct PlatformInfuser;
+
+#[async_trait]
+trait Infuser {
+    /// Run in "input-mode", essentially tee+grep
+    async fn run_input(
+        sock: &str,
+        initial_tty: Option<String>,
+        inital_filter: Option<String>,
+    ) -> anyhow::Result<()>;
+
+    /// Run in listen-mode, gets filtered output from server
+    async fn run_listen(sock: &str) -> anyhow::Result<()>;
+
+    /// Run a utility command
+    async fn run_utility_command(
+        sock: &str,
+        command: Command,
+        response: ResponseAction,
+    ) -> anyhow::Result<()>;
+
+    /// Clear the current filter
+    async fn clear_filter(sock: &str) -> anyhow::Result<()> {
+        let cmd = Command::NewFilter(None);
+        Self::run_utility_command(sock, cmd, ResponseAction::Oneshot).await
+    }
+
+    /// Update the current filter, if any
+    async fn update_filter(pipe: &str, filter: String) -> anyhow::Result<()> {
+        let cmd = Command::NewFilter(Some(filter));
+        Self::run_utility_command(pipe, cmd, ResponseAction::Oneshot).await
+    }
+
+    /// Print the current filter, if any
+    async fn print_filter(pipe: &str) -> anyhow::Result<()> {
+        let cmd = Command::GetCurrentFilter;
+        Self::run_utility_command(pipe, cmd, ResponseAction::WaitAndPrint).await
+    }
+
+    /// Get the current TTY / Console listening, if any
+    async fn get_tty(pipe: &str) -> anyhow::Result<()> {
+        let cmd = Command::GetCurrentTty;
+        Self::run_utility_command(pipe, cmd, ResponseAction::WaitAndPrint).await
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     match args.mode {
-        OperationMode::Run { tty, filter } => run_input(&args.sock_name, tty, filter).await,
-        OperationMode::Update { new_filter } => update_filter(&args.sock_name, new_filter).await,
-        OperationMode::Clear => clear_filter(&args.sock_name).await,
-        OperationMode::GetFilter => get_filter(&args.sock_name).await,
-        OperationMode::Listen => listen(&args.sock_name).await,
-        OperationMode::GetTty => get_tty(&args.sock_name).await,
-    }
-}
-
-async fn update_filter(sock: &str, filter: String) -> anyhow::Result<()> {
-    let cmd = Command::NewFilter(Some(filter));
-    run_utility_command(sock, cmd).await.map(|_| ())
-}
-async fn clear_filter(sock: &str) -> anyhow::Result<()> {
-    let cmd = Command::NewFilter(None);
-    run_utility_command(sock, cmd).await.map(|_| ())
-}
-async fn get_filter(sock: &str) -> anyhow::Result<()> {
-    let cmd = Command::GetCurrentFilter;
-    let mut sock = run_utility_command(sock, cmd).await?;
-    let mut response = String::new();
-    sock.read_to_string(&mut response).await?;
-    println!("{}", response);
-    Ok(())
-}
-
-async fn get_tty(sock: &str) -> anyhow::Result<()> {
-    let cmd = Command::GetCurrentTty;
-    let mut sock = run_utility_command(sock, cmd).await?;
-    let mut response = String::new();
-    sock.read_to_string(&mut response).await?;
-    println!("{}", response);
-    Ok(())
-}
-
-async fn listen(sock: &str) -> anyhow::Result<()> {
-    let tty = nix::unistd::ttyname(0)?
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("cannot convert tty to string"))?
-        .to_string();
-    let cmd = Command::Listen(tty);
-    run_utility_command(sock, cmd).await.map(|_| ())
-}
-
-async fn run_utility_command(sock: &str, command: Command) -> anyhow::Result<UnixStream> {
-    let tx_path = Path::new("/tmp").join(sock);
-    let mut sock = UnixStream::connect(&tx_path).await?;
-    let json = serde_json::to_vec(&command)?;
-    let _ = sock.write(&json).await;
-    Ok(sock)
-}
-
-async fn open_and_clear_tty(tty: &str) -> anyhow::Result<Tty> {
-    let mut f = tokio::fs::OpenOptions::new()
-        .write(true)
-        .append(true)
-        .open(tty)
-        .await?;
-    f.write_all(CLEAR_SCREEN.as_bytes()).await?;
-
-    Ok(Tty {
-        inner: f,
-        path: tty.to_string(),
-    })
-}
-
-async fn run_input(
-    sock: &str,
-    initial_tty: Option<String>,
-    inital_filter: Option<String>,
-) -> anyhow::Result<()> {
-    let mut re = inital_filter
-        .as_ref()
-        .and_then(|filter| Regex::new(filter).ok());
-    let mut filter_string = inital_filter;
-    let mut input_lines = BufReader::new(tokio::io::stdin()).lines();
-
-    let tx_path = Path::new("/tmp").join(sock);
-    let _ = std::fs::remove_file(&tx_path);
-
-    let sock = UnixListener::bind(&tx_path)?;
-    let mut tty: Option<Tty> = None;
-
-    if let Some(tty_name) = initial_tty {
-        tty = Some(open_and_clear_tty(&tty_name).await?);
-    }
-
-    loop {
-        tokio::select! {
-            Ok(Some(mut x)) = input_lines.next_line() => {
-                println!("{x}");
-                if let Some(client) = tty.as_mut() {
-                    if let Some(re) = &re {
-                        if re.is_match(&x) {
-                            x.push('\n');
-                            if client.inner.write_all(x.as_bytes()).await.is_err() {
-                                // clear the tty if we had a write error
-                                tty = None;
-                            }
-                        }
-                    }
-                }
-            }
-            Ok((mut client,_)) = sock.accept() => {
-                let mut buf = [0; 1024];
-                if let Ok(x) = client.read(&mut buf).await {
-                    if x > 0 {
-                        let s : serde_json::Result<Command> = serde_json::from_slice(&buf[..x]);
-                        match s {
-                            Ok(cmd) => match cmd {
-                                Command::NewFilter(Some(f)) => {
-                                    if let Ok(new_regex) = Regex::new(&f) {
-                                        re = Some(new_regex);
-                                        filter_string = Some(f);
-                                    }
-                                }
-                                Command::NewFilter(None) => {
-                                    re = None;
-                                    filter_string = None;
-                                }
-                                Command::GetCurrentFilter => {
-                                    let filter = filter_string
-                                        .as_ref()
-                                        .map(|x| x.as_bytes())
-                                        .unwrap_or_else(|| b"<no current filter>");
-                                    let _ = client.write_all(filter).await;
-                                }
-                                Command::GetCurrentTty => {
-                                    let tty_name = tty
-                                        .as_ref()
-                                        .map(|x| x.path.as_bytes())
-                                        .unwrap_or_else(|| b"<no current tty>");
-                                    let _ = client.write_all(tty_name).await;
-                                }
-                                Command::Listen(tty_name) => {
-                                    if let Ok(new_tty) = open_and_clear_tty(&tty_name).await {
-                                        tty = Some(new_tty);
-                                    }
-                                }
-
-                            },
-                            Err(e) => {
-                                println!("Invalid command {e:?}");
-                            }
-                        }
-                    }
-                }
-            }
-            else => {
-                break;
-            }
+        OperationMode::Run { tty, filter } => {
+            PlatformInfuser::run_input(&args.sock_name, tty, filter).await
         }
+        OperationMode::Update { new_filter } => {
+            PlatformInfuser::update_filter(args.sock_name.as_ref(), new_filter).await
+        }
+        OperationMode::Clear => PlatformInfuser::clear_filter(args.sock_name.as_ref()).await,
+        OperationMode::GetFilter => PlatformInfuser::print_filter(&args.sock_name).await,
+        OperationMode::Listen => PlatformInfuser::run_listen(args.sock_name.as_ref()).await,
+        OperationMode::GetTty => PlatformInfuser::get_tty(&args.sock_name).await,
     }
-    Ok(())
 }
