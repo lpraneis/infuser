@@ -49,7 +49,7 @@ enum OperationMode {
     GetFilter,
     /// Get currently registered tty or console
     GetTty,
-    /// Register current console for output; replaces previous tty or console, if any
+    /// Register current console for output; replaces previous tty or console, if any.
     /// This is required on Windows since there aren't ttys
     Listen,
     /// Run and get input
@@ -60,7 +60,7 @@ enum OperationMode {
         #[clap(short, long)]
         filter: Option<String>,
     },
-    /// Update running infuser
+    /// Update running infuser filter
     Update {
         /// updated filter
         new_filter: String,
