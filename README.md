@@ -26,21 +26,29 @@ The tty used can also be changed later, and new output will be sent to the new t
 infuser listen
 ```
 
+## Windows Support
+`infuser` runs in a slightly different capacity on Windows. 
+Instead of specifying a `tty` on the command line, general operation is to start the "listening" process first and then run `infuser listen` in a separate terminal pane. This limitation is due to the fact that named pipes are used on Windows to send output from one terminal to another, rather than writing directly to the unix pts object.
+
+Additionally, `infuser` only works in `cmd.exe` and not Powershell. This is because of how Powershell buffers pipeline output rather than allowing both processes to run concurrently. This will hopefully be fixed in future updates.
+
 ## Usage
 ```
+Filters your tee
+
 Usage: infuser [OPTIONS] <COMMAND>
 
 Commands:
-  clear       clear running filter
-  get-filter  get currently running filter
-  get-tty     get currently registered tty
-  listen      register current tty for output; replaces previous tty, if any
-  run         run and get input
-  update      update running infuser
+  clear       Clear running filter
+  get-filter  Get currently running filter
+  get-tty     Get currently registered tty or console
+  listen      Register current console for output; replaces previous tty or console, if any. This is required on Windows since there aren't ttys
+  run         Run and get input
+  update      Update running infuser filter
   help        Print this message or the help of the given subcommand(s)
 
 Options:
-      --sock-name <SOCK_NAME>  Name of unix domain socket to be created in /tmp for IPC [default: infuser.sock]
+      --sock-name <SOCK_NAME>  Name of communication pipe On Unix, this is a Unix Domain Socket in /tmp On Windows, this is the name of a named pipe [default: infuser.pipe]
   -h, --help                   Print help information (use `--help` for more detail)
   -V, --version                Print version information
 ```
