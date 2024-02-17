@@ -1,10 +1,11 @@
 use crate::{Command, Infuser, PlatformInfuser, ResponseAction};
+use anyhow::Context;
 use async_trait::async_trait;
 use regex::Regex;
 use std::path::Path;
 use tokio::{
     fs::File,
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::{UnixListener, UnixStream},
 };
 
@@ -13,7 +14,7 @@ const CLEAR_SCREEN: &str = "\x1b\x63";
 
 /// Wrapper over a tty handle and path
 struct Tty {
-    inner: File,
+    inner: BufWriter<File>,
     path: String,
 }
 
@@ -125,15 +126,19 @@ impl Infuser for PlatformInfuser {
     ) -> anyhow::Result<()> {
         // Write to the sock
         let tx_path = Path::new("/tmp").join(sock);
-        let mut sock = UnixStream::connect(&tx_path).await?;
-        let json = serde_json::to_vec(&command)?;
+        let mut sock = UnixStream::connect(&tx_path)
+            .await
+            .context("Failed to connect to server pipe. Is the server process running?")?;
+        let json = serde_json::to_vec(&command).context("Invalid command")?;
         let _ = sock.write(&json).await;
 
         // Perform action if necessary
         match response {
             ResponseAction::WaitAndPrint => {
                 let mut response = String::new();
-                sock.read_to_string(&mut response).await?;
+                sock.read_to_string(&mut response)
+                    .await
+                    .context("Failed to read command response. Did the server process die?")?;
                 println!("{}", response);
             }
             ResponseAction::Oneshot => {}
@@ -147,11 +152,16 @@ async fn open_and_clear_tty(tty: &str) -> anyhow::Result<Tty> {
         .write(true)
         .append(true)
         .open(tty)
-        .await?;
-    f.write_all(CLEAR_SCREEN.as_bytes()).await?;
+        .await
+        .context(format!("Failed to open tty. Does {tty} exist?"))?;
+    f.write_all(CLEAR_SCREEN.as_bytes())
+        .await
+        .context("Failed to clear screen")?;
+
+    let inner = BufWriter::new(f);
 
     Ok(Tty {
-        inner: f,
+        inner,
         path: tty.to_string(),
     })
 }
